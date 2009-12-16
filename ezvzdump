@@ -54,27 +54,9 @@
  
 # This variable contains a space delimited list of VEID's to be backed up.
 # You can use VEIDS="$(cd /vz/private/ && echo *)"  to backup all your VE's.
-VEIDS="101 102 103 104"
 
-VZ_CONF="/etc/vz/conf/"             # the path to your openvz $VEID.conf files
-VZ_PRIVATE="/vz/private/"           # the path to the running VE's
-LOCAL_DIR="/vz/ezvzdump/"           # the local rsync cache / destination directory
-
-# The remote host and path that this script will rsync the VE's to.
-REMOTE_HOST="somehost.example.com"
-REMOTE_DIR="/backup/"
-
-# Default rsync flags (please note the potentially unsafe delete flags).
-# You can also remove the v flag to get less verbose logging.
-RSYNC_DEFAULT="rsync -ravH --delete-after --delete-excluded"
-
-# Exclude these directories from backup (space delimited).
-# I left /var/log in the backup because when doing a full restore
-# it's necessary that this directory structure is present.
-RSYNC_EXCLUDE="/usr/portage"
-
-# Path to vzctl executable
-VZCTL="vzctl"
+. ./ezvzdump.conf
+# TODO: change to appropiate config path
 
 # Nice debugging messages...
 function e {
@@ -84,11 +66,53 @@ function die {
   e "Error: $1" >&2
   exit 1;
 }
+function toUpper() {
+  echo $1 | tr "[:lower:]" "[:upper:]" 
+}
+
+function isNumber() {
+  [ $1 -eq $1 ] 2>/dev/null
+}
+
+function check_only_instance() {
+  # Check no other instance of this script is running
+  e "Checking this is the only backup instance running"
+  if [ -e $PIDFILE ]; then
+    pid=`cat ${PIDFILE}`
+    if kill -0 &>1 > /dev/null $pid; then
+      return 1
+    else
+      rm ${PIDFILE}
+    fi
+  fi
+  echo $$ > ${PIDFILE}
+  return 0
+}
 
 # Make sure all is sane
 [ ! -d "${VZ_CONF}" ]    && die "\$VZ_CONF directory doesn't exist. ($VZ_CONF)"
 [ ! -d "${VZ_PRIVATE}" ] && die "\$VZ_PRIVATE directory doesn't exist. ($VZ_PRIVATE)"
 [ ! -d "${LOCAL_DIR}" ]  && die "\$LOCAL_DIR directory doesn't exist. ($LOCAL_DIR)"
+[ -z "${DEFAULT_BACKUP_SET}" ]  && die "\$DEFAULT_BACKUP_SET not set." 
+[ -z "${DEFAULT_QTY}" ]  && die "\$DEFAULT_QTY not set." 
+
+#setup backup_set and rotation
+[ -z "$1" ] && BACKUP_SET=${DEFAULT_BACKUP_SET}
+BACKUP_SET=`toUpper ${BACKUP_SET}`
+eval ROTATION=\${${BACKUP_SET}_QTY}
+isNumber $ROTATION || die "Invalid Rotation Value for '${BACKUP_SET}' backup set: '$ROTATION', check configuration file."; 
+
+#check there is no other backup instance running.
+check_only_instance() || die "Another backup is already running"
+
+#for ROT in {1..${ROTATION}}; do
+#done
+#    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.6.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.6.tar.gz ${REMOTE_DIR}${VEID}.7.tar.gz"
+#    ssh ${REMOTE_HOST} "tar czf ${REMOTE_DIR}${VEID}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
+
+#sleep 10
+#devel
+exit 0
 
 e "`hostname` - VZ backup for containers $VEIDS started." > /tmp/vzbackuptimes
 # Loop through each VEID
@@ -173,7 +197,10 @@ done;
 e "`hostname` - VZ backup for containers $VEIDS complete!" >> /tmp/vzbackuptimes
 # Email a log of the backup process to some email address. Can be modified slightly to use native "mail" command
 # if sendmail is installed and configured locally.
-cat /tmp/vzbackuptimes | sendEmail -f root@`hostname` -t someuser@example.com -u "`hostname` VZ backup statistics." -s mail.example.com #(put your open relay here)
+cat /tmp/vzbackuptimes | sendEmail -f root@`hostname` -t ${MAIL_NOTIFY} -u "`hostname` VZ backup statistics." -s ${MAIL_RELAY} #(put your open relay here)
 echo
 cat /tmp/vzbackuptimes
 rm /tmp/vzbackuptimes
+rm ${PIDFILE}
+
+
