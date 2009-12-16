@@ -1,71 +1,21 @@
 #!/bin/bash
- 
-# ezvzdump 
 
-# Copyright (C) 2008 Alex Lance (alla at cyber.com.au)
-# Sponsored by Silverband Pty. Ltd. 
- 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by the Free
-# Software Foundation, either version 3 of the License, or (at your option) any
-# later version.
- 
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-# more details: http://www.gnu.org/licenses/gpl.txt
- 
+# usage: ezvzdump [backup_set]
 
-# Instructions 
-# ------------
-
-# This script rsyncs a VE to a specified local directory, suspends the running
-# VE, rsyncs again, and then resumes the VE. This creates a stable snapshot of
-# the VE directories with minimal downtime.
-
-# Once the VE has been dumped out locally, it is rsynced to a remote host. When
-# the rsync has completed, a tar archive is created on the remote host. The tar
-# archive is compatible with the vzdump tar format, so the VE tar file may be
-# later restored with the `vzdump --restore` command.
-
-# By tarring the files together on the remote host, the burden of creating
-# the tar archive is taken away from the hardware node, and given to the remote
-# host / backup server. This ensures that minimal additional CPU/disk resources
-# are used on the machine that is running the VE's.
-
-# This script runs slow the first time you use it, but from then on it utilizes
-# the local and remote stored snapshot directories so that the rsyncs happen
-# expediently. The script does not wait for the remote tar process to complete,
-# it simply kicks off the tar archive creation and then immediately continues.
-
-# This script uses rsync and ssh and assumes that you already have ssh keys
-# set up between your hosts. This script was written because vzdump takes too
-# long and does not utilize a local cache, and also does not do network
-# backups. This script also puts less strain on the hardware node by finishing
-# backups more quickly, and making the remote host do the heavy lifting.
-
-# NASTY BUG! Make sure you're not "vzctl enter"ing a VE while it's being
-# suspended. On my machine (Ubuntu 2.6.24-24-openvz) it caused the VE to
-# zombifiy and I had to reboot the host (including killing the VZ shutdown 
-# script because it was unable to shutdown the VE/processes.) Just don't do it!
-
-# This section contains variables that require user customisation. 
-# NOTE: all directory names *must* end in a forward-slash. 
- 
-# This variable contains a space delimited list of VEID's to be backed up.
-# You can use VEIDS="$(cd /vz/private/ && echo *)"  to backup all your VE's.
-
-. ./ezvzdump.conf
+# process configuration file
 # TODO: change to appropiate config path
+. ./ezvzdump.conf
 
 # Nice debugging messages...
 function e {
   echo -e $(date "+%F %T"):  $1
 }
+
 function die {
   e "Error: $1" >&2
   exit 1;
 }
+
 function toUpper() {
   echo $1 | tr "[:lower:]" "[:upper:]" 
 }
