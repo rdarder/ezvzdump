@@ -6,9 +6,37 @@
 # TODO: change to appropiate config path
 . ./ezvzdump.conf
 
-# Nice debugging messages...
+
+# function interactive_step {
+#   #$1 -> answer options
+#   #$2 -> continue options, else quit
+#   if [ -z "${INTERACTIVE} ]; then
+#   fi
+# }
+
+#function is_interactive() {
+#  echo ${-};
+#  case "${-}" in
+#  "*i*") 
+#    INTERACTIVE="1";
+#  ;; 
+#  "*") 
+#    INTERACTIVE="";
+#  ;;
+#  esac
+#}
+
 function e {
   echo -e $(date "+%F %T"):  $1
+}
+
+function email_file() {
+  cat $1 | mail -s "`hostname` VZ backup statistics." ${MAIL_NOTIFY}
+}
+
+function log {
+  e "$1" 
+  e "$1" >> $LOG_FILE
 }
 
 function die {
@@ -17,19 +45,41 @@ function die {
 }
 
 function toUpper() {
-  echo $1 | tr "[:lower:]" "[:upper:]" 
+  echo "$1" | tr "[:lower:]" "[:upper:]" 
 }
 
 function isNumber() {
   [ $1 -eq $1 ] 2>/dev/null
 }
+function removeNewLine() {
+  echo -n "$1" | tr -d '\n'
+}
+
+function count_lines() {
+  local ln
+  ln=0
+  if [ -n "${2}" ] && isNumber "${2}"; then
+    while read line
+    do
+      ln=$((ln+1));
+      echo -n -e "Progress: $(((ln*100)/$2))%. ${1}: ${ln}.\r"
+    done
+  else
+    while read line
+    do
+      ln=$((ln+1));
+      echo -n -e "${ln} ${1}.\r"
+    done
+  fi
+  echo -e "${ln} ${1}. Finished\t\t\t"
+}
 
 function check_only_instance() {
   # Check no other instance of this script is running
-  e "Checking this is the only backup instance running"
   if [ -e $PIDFILE ]; then
     pid=`cat ${PIDFILE}`
-    if kill -0 &>1 > /dev/null $pid; then
+    if kill -0 ${pid} > /dev/null 2>&1; then
+      echo -n ${pid}
       return 1
     else
       rm ${PIDFILE}
@@ -39,33 +89,44 @@ function check_only_instance() {
   return 0
 }
 
+function remote_execute() {
+	ssh $1 nice -n 19 ionice -c3 $2
+}
+
+# setup self priority
+if [ "MIN_PRIORITY" = "true" ]; then
+  renice -n 19 -p $$
+  ionice -c 3 -p $$
+fi
+
+
 # Make sure all is sane
 [ ! -d "${VZ_CONF}" ]    && die "\$VZ_CONF directory doesn't exist. ($VZ_CONF)"
 [ ! -d "${VZ_PRIVATE}" ] && die "\$VZ_PRIVATE directory doesn't exist. ($VZ_PRIVATE)"
 [ ! -d "${LOCAL_DIR}" ]  && die "\$LOCAL_DIR directory doesn't exist. ($LOCAL_DIR)"
 [ -z "${DEFAULT_BACKUP_SET}" ]  && die "\$DEFAULT_BACKUP_SET not set." 
 [ -z "${DEFAULT_QTY}" ]  && die "\$DEFAULT_QTY not set." 
+[ -z "${VEIDS_DEFAULT}" ]  && die "\$VEIDS_DEFAULT not set." 
 
 #setup backup_set and rotation
-[ -z "$1" ] && BACKUP_SET=${DEFAULT_BACKUP_SET}
+[ -n "$1" ] && BACKUP_SET=$1 || BACKUP_SET=${DEFAULT_BACKUP_SET}
 BACKUP_SET=`toUpper ${BACKUP_SET}`
 eval ROTATION=\${${BACKUP_SET}_QTY}
 isNumber $ROTATION || die "Invalid Rotation Value for '${BACKUP_SET}' backup set: '$ROTATION', check configuration file."; 
 
+#setup log file (which will be emailed)
+LOG_FILE=`mktemp` 
+
 #check there is no other backup instance running.
-check_only_instance() || die "Another backup is already running"
+e "Checking this is the only backup instance running"
+OTHER_INSTANCE=`check_only_instance` || die "Another backup is already running ${OTHER_INSTANCE}. ${?}"
 
-#for ROT in {1..${ROTATION}}; do
-#done
-#    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.6.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.6.tar.gz ${REMOTE_DIR}${VEID}.7.tar.gz"
-#    ssh ${REMOTE_HOST} "tar czf ${REMOTE_DIR}${VEID}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
-
-#sleep 10
-#devel
-exit 0
-
-e "`hostname` - VZ backup for containers $VEIDS started." > /tmp/vzbackuptimes
 # Loop through each VEID
+eval VEIDS=\${VEIDS_${BACKUP_SET}}
+[ -z "${VEIDS}" ] && VEIDS=${VEIDS_DEFAULT}
+
+log "`hostname` - VZ backup for containers $VEIDS started."
+
 for VEID in $VEIDS; do
 
   VEHOSTNAME=`vzlist -o hostname $VEID -H`
@@ -80,7 +141,7 @@ for VEID in $VEIDS; do
 
   e "Commencing initial ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR}"
   [ ! -d "${VZ_PRIVATE}${VEID}" ] && die "\$VZ_PRIVATE\$VEID directory doesn't exist. (${VZ_PRIVATE}${VEID})"
-  ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR}
+  ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
 
   # If the VE is running, suspend, re-rsync and then resume it ...
   if [ -n "$(${VZCTL} status ${VEID} | grep running)" ]; then
@@ -90,7 +151,7 @@ for VEID in $VEIDS; do
     ${VZCTL} chkpnt $VEID --suspend
 
     e "Commencing second pass rsync ..."
-    ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR}
+    ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
 
     e "Resuming VEID: $VEID"
     ${VZCTL} chkpnt $VEID --resume
@@ -98,7 +159,7 @@ for VEID in $VEIDS; do
     elapsed_seconds="$(expr $after - $before)"
 
     e "Done."
-    e "Container ${VEID} ($VEHOSTNAME) was down $elapsed_seconds seconds during backup process." >> /tmp/vzbackuptimes
+    log "Container ${VEID} ($VEHOSTNAME) was down $elapsed_seconds seconds during backup process." 
 
   else
     e "# # # Skipping suspend/re-rsync/resume, as the VEID: ${VEID} is not curently running."
@@ -124,33 +185,44 @@ for VEID in $VEIDS; do
   # Run the remote rsync
   if [ -n "${REMOTE_HOST}" ] && [ -n "${REMOTE_DIR}" ]; then
     e "Commencing remote ${RSYNC} ${LOCAL_DIR}${VEID} ${REMOTE_HOST}:${REMOTE_DIR}${VEID}"
-    ${RSYNC} ${LOCAL_DIR}${VEID}/ ${REMOTE_HOST}:${REMOTE_DIR}${VEID}/
+    ${RSYNC} ${LOCAL_DIR}${VEID}/ ${REMOTE_HOST}:${REMOTE_DIR}${VEID}/ | count_lines "Files transfered" 
 
-    # Rotate older tar.gz backups if they exist. You can comment out these lines if you wish to have only one copy.
-    e "Checking for existing files ${REMOTE_HOST}:${REMOTE_DIR}${VEID}.X.tar and rotating them"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.6.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.6.tar.gz ${REMOTE_DIR}${VEID}.7.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.5.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.5.tar.gz ${REMOTE_DIR}${VEID}.6.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.4.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.4.tar.gz ${REMOTE_DIR}${VEID}.5.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.3.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.3.tar.gz ${REMOTE_DIR}${VEID}.4.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.2.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.2.tar.gz ${REMOTE_DIR}${VEID}.3.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.1.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.1.tar.gz ${REMOTE_DIR}${VEID}.2.tar.gz"
-    ssh ${REMOTE_HOST} "[ -f ${REMOTE_DIR}${VEID}.0.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.0.tar.gz ${REMOTE_DIR}${VEID}.1.tar.gz"
-
-    # Create a remote tar archive - note you can remove the ampersand from the end if you
-    # don't want multiple tar processes running on the remote host simultaneously.
-    e "Making a g-zip compresssed tar archive on remote host (this process will run in the background on the remote host)."
-    ssh ${REMOTE_HOST} "tar czf ${REMOTE_DIR}${VEID}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
+    e "rotating up to $ROTATION backups"
+    for ROT in `seq $((ROTATION-1)) -1 0`; do
+      remote_execute "${REMOTE_HOST}" "[ -f ${REMOTE_DIR}${VEID}.${BACKUP_SET}${ROT}.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.${ROT}.tar.gz ${REMOTE_DIR}${VEID}.${BACKUP_SET}.$((ROT+1)).tar.gz" 
+      if [ "$?" -eq 0 ]; then
+        e "rotated backup ${ROT}"
+      else
+        e "backup ${ROT} does not exist."
+      fi
+    done
+      if [ "${CONCURRENT_JOBS}" = "true" ]; then
+        e "making remote gzipped tar in backgound, no feedback"
+        remote_execute "${REMOTE_HOST}" "tar czf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
+      else
+      TOTAL_LINES=`find ${LOCAL_DIR}/${VEID} | wc -l`
+	e "making remote gzipped tar backup"
+        remote_execute "${REMOTE_HOST}" "tar cvzf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null" | count_lines "files archived" "${TOTAL_LINES}"
+      fi
   fi
 
   e "Done."
 done;
-e "`hostname` - VZ backup for containers $VEIDS complete!" >> /tmp/vzbackuptimes
-# Email a log of the backup process to some email address. Can be modified slightly to use native "mail" command
-# if sendmail is installed and configured locally.
-cat /tmp/vzbackuptimes | sendEmail -f root@`hostname` -t ${MAIL_NOTIFY} -u "`hostname` VZ backup statistics." -s ${MAIL_RELAY} #(put your open relay here)
+
+log "`hostname` - VZ backup for containers $VEIDS complete!" 
+
+# email log file
+email_file ${LOG_FILE}
+
+
+#print log file
 echo
-cat /tmp/vzbackuptimes
-rm /tmp/vzbackuptimes
+cat ${LOG_FILE}
+
+#cleanup temporary files
+rm ${LOG_FILE}
+
+#cleanup pid file
 rm ${PIDFILE}
 
 
