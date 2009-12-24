@@ -1,30 +1,29 @@
 #!/bin/bash
 
-# usage: ezvzdump [backup_set]
-
-# process configuration file
-# TODO: change to appropiate config path
-. ./ezvzdump.conf
+# usage: ezvzdump [-c config_file ] [ -s backup_set]
 
 
-# function interactive_step {
-#   #$1 -> answer options
-#   #$2 -> continue options, else quit
-#   if [ -z "${INTERACTIVE} ]; then
-#   fi
-# }
-
-#function is_interactive() {
-#  echo ${-};
-#  case "${-}" in
-#  "*i*") 
-#    INTERACTIVE="1";
-#  ;; 
-#  "*") 
-#    INTERACTIVE="";
-#  ;;
-#  esac
-#}
+#not used yet
+function yesno_step() {
+  #$1 -> Question
+  #$2 -> all answers
+  #$3 -> positive answers 
+  #$4 -> default option
+  if [ -n "${INTERACTIVE}" ]; then
+    echo -n $1 
+    for a in $2; do
+      echo -n "$a "
+    done
+    local answer
+    read answer
+    [ -n "${answer}" ] || answer=$4
+    if inList answer $3; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+}
 
 function e {
   echo -e $(date "+%F %T"):  $1
@@ -41,7 +40,12 @@ function log {
 
 function die {
   e "Error: $1" >&2
-  exit 1;
+  #local answer
+  #if yesno_step "Do you want to continue anyway?"; then
+  #  return 
+  #else
+    exit 1;
+  #fi
 }
 
 function toUpper() {
@@ -51,8 +55,18 @@ function toUpper() {
 function isNumber() {
   [ $1 -eq $1 ] 2>/dev/null
 }
+
 function removeNewLine() {
   echo -n "$1" | tr -d '\n'
+}
+
+function inList() {
+  for item in $2; do
+    if [ "$1" = "$item" ]; then
+      return 0
+    fi
+  done
+    return 1
 }
 
 function count_lines() {
@@ -71,21 +85,21 @@ function count_lines() {
       echo -n -e "${ln} ${1}.\r"
     done
   fi
-  echo -e "${ln} ${1}. Finished\t\t\t"
+  echo -e "${ln} ${1}. Finished\t\t\t\n"
 }
 
 function check_only_instance() {
   # Check no other instance of this script is running
-  if [ -e $PIDFILE ]; then
-    pid=`cat ${PIDFILE}`
+  if [ -e $PID_FILE ]; then
+    pid=`cat ${PID_FILE}`
     if kill -0 ${pid} > /dev/null 2>&1; then
       echo -n ${pid}
       return 1
     else
-      rm ${PIDFILE}
+      rm ${PID_FILE}
     fi
   fi
-  echo $$ > ${PIDFILE}
+  echo $$ > ${PID_FILE}
   return 0
 }
 
@@ -93,25 +107,49 @@ function remote_execute() {
 	ssh $1 nice -n 19 ionice -c3 $2
 }
 
-# setup self priority
+#default config file
+CONFIG_FILE="./ezvzdump.conf"
+
+#read command line arguments
+while [ $# -gt 0 ]
+do
+	case "$1" in 
+    -c) CONFIG_FILE=$2; shift;;
+    -s) BACKUP_SET=$2; shift;;
+    -i) INTERACTIVE="true";;
+    -*)
+       echo >&2 \
+       "usage $0 [-c config_file] [-s backup_set]"
+       exit 1;;
+     *) break;;
+	esac
+  shift
+done
+
+#read configuration file
+[ ! -f ${CONFIG_FILE} ] && die "Configuration file not found. ($CONFIG_FILE)"
+e "reading configuration from ${CONFIG_FILE}"
+. ${CONFIG_FILE}
+
+
+# setup self running priority
 if [ "MIN_PRIORITY" = "true" ]; then
   renice -n 19 -p $$
   ionice -c 3 -p $$
 fi
 
-
-# Make sure all is sane
-[ ! -d "${VZ_CONF}" ]    && die "\$VZ_CONF directory doesn't exist. ($VZ_CONF)"
-[ ! -d "${VZ_PRIVATE}" ] && die "\$VZ_PRIVATE directory doesn't exist. ($VZ_PRIVATE)"
-[ ! -d "${LOCAL_DIR}" ]  && die "\$LOCAL_DIR directory doesn't exist. ($LOCAL_DIR)"
-[ -z "${DEFAULT_BACKUP_SET}" ]  && die "\$DEFAULT_BACKUP_SET not set." 
-[ -z "${DEFAULT_QTY}" ]  && die "\$DEFAULT_QTY not set." 
-[ -z "${VEIDS_DEFAULT}" ]  && die "\$VEIDS_DEFAULT not set." 
+# Make sure required variables are set
+[ -d "${VZ_CONF}" ]    || die "\$VZ_CONF directory doesn't exist. ($VZ_CONF)"
+[ -d "${VZ_PRIVATE}" ] || die "\$VZ_PRIVATE directory doesn't exist. ($VZ_PRIVATE)"
+[ -d "${LOCAL_DIR}" ]  || die "\$LOCAL_DIR directory doesn't exist. ($LOCAL_DIR)"
+[ -n "${DEFAULT_BACKUP_SET}" ]  || die "\$DEFAULT_BACKUP_SET not set." 
+[ -n "${DEFAULT_ROTATION}" ]  || die "\$DEFAULT_ROTATION not set." 
+[ -n "${VEIDS_DEFAULT}" ]  || die "\$VEIDS_DEFAULT not set." 
 
 #setup backup_set and rotation
-[ -n "$1" ] && BACKUP_SET=$1 || BACKUP_SET=${DEFAULT_BACKUP_SET}
+[ -n "${BACKUP_SET}" ] ||  BACKUP_SET=${DEFAULT_BACKUP_SET}
 BACKUP_SET=`toUpper ${BACKUP_SET}`
-eval ROTATION=\${${BACKUP_SET}_QTY}
+eval ROTATION=\${${BACKUP_SET}_ROTATION}
 isNumber $ROTATION || die "Invalid Rotation Value for '${BACKUP_SET}' backup set: '$ROTATION', check configuration file."; 
 
 #setup log file (which will be emailed)
@@ -127,7 +165,32 @@ eval VEIDS=\${VEIDS_${BACKUP_SET}}
 
 log "`hostname` - VZ backup for containers $VEIDS started."
 
+#check if previous backup was interrupted
+#the state file is different per backup set. it is built upon STATE_DIR + BACKUP_SET
+STATE_FILE="${STATE_DIR}/${BACKUP_SET}.state"
+
+log "checking for interrupted backups in ${STATE_FILE} ..."
+
+if [ -f "$STATE_FILE" ]; then
+  ALREADY_DONE=`cat "$STATE_FILE"`
+fi
+if [ -n "$ALREADY_DONE" ]; then
+	log "Found. Backups already completed for VEIDS:"
+	echo "$ALREADY_DONE"
+else
+  log "None Found."
+fi
+  
+
+
 for VEID in $VEIDS; do
+
+  if [ -n "$ALREADY_DONE" ]; then
+	  if inList "$VEID" "$ALREADY_DONE"; then 
+	    log "backup for $VEID already done in last interrupted backup"
+	    continue
+	  fi
+  fi
 
   VEHOSTNAME=`vzlist -o hostname $VEID -H`
   echo ""
@@ -187,6 +250,7 @@ for VEID in $VEIDS; do
     e "Commencing remote ${RSYNC} ${LOCAL_DIR}${VEID} ${REMOTE_HOST}:${REMOTE_DIR}${VEID}"
     ${RSYNC} ${LOCAL_DIR}${VEID}/ ${REMOTE_HOST}:${REMOTE_DIR}${VEID}/ | count_lines "Files transfered" 
 
+    #rotate previous remote backups
     e "rotating up to $ROTATION backups"
     for ROT in `seq $((ROTATION-1)) -1 0`; do
       remote_execute "${REMOTE_HOST}" "[ -f ${REMOTE_DIR}${VEID}.${BACKUP_SET}${ROT}.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.${ROT}.tar.gz ${REMOTE_DIR}${VEID}.${BACKUP_SET}.$((ROT+1)).tar.gz" 
@@ -196,24 +260,34 @@ for VEID in $VEIDS; do
         e "backup ${ROT} does not exist."
       fi
     done
+      #make gzipped tar backup
       if [ "${CONCURRENT_JOBS}" = "true" ]; then
+	#run in background, no feedback
         e "making remote gzipped tar in backgound, no feedback"
         remote_execute "${REMOTE_HOST}" "tar czf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
       else
       TOTAL_LINES=`find ${LOCAL_DIR}/${VEID} | wc -l`
 	e "making remote gzipped tar backup"
+	#run in foreground, percent feedback
         remote_execute "${REMOTE_HOST}" "tar cvzf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null" | count_lines "files archived" "${TOTAL_LINES}"
       fi
   fi
 
   e "Done."
+
+  #add current veid to state file for future resumes.
+  echo "$VEID" >> "$STATE_FILE"
+
 done;
 
 log "`hostname` - VZ backup for containers $VEIDS complete!" 
 
+#all backups finished, delete STATE_FILE for this backup set.
+rm "$STATE_FILE"
+
+
 # email log file
 email_file ${LOG_FILE}
-
 
 #print log file
 echo
@@ -223,6 +297,6 @@ cat ${LOG_FILE}
 rm ${LOG_FILE}
 
 #cleanup pid file
-rm ${PIDFILE}
+rm ${PID_FILE}
 
 
