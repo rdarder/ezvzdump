@@ -49,5 +49,5 @@
 # zombifiy and I had to reboot the host (including killing the VZ shutdown 
 # script because it was unable to shutdown the VE/processes.) Just don't do it!
 
-# usage: ezvzdump [backup_set]
+# usage: ezvzdump [-c config_file] [-s backup_set]
 
