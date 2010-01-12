@@ -72,17 +72,18 @@ function inList() {
 function count_lines() {
   local ln
   ln=0
+  echo ""
   if [ -n "${2}" ] && isNumber "${2}"; then
     while read line
     do
       ln=$((ln+1));
-      echo -n -e "Progress: $(((ln*100)/$2))%. ${1}: ${ln}.\r"
+      echo -n -e "\t\t\rProgress: $(((ln*100)/$2))%. ${1}: ${ln}."
     done
   else
     while read line
     do
       ln=$((ln+1));
-      echo -n -e "${ln} ${1}.\r"
+      echo -n -e "\t\t\r${ln} ${1}."
     done
   fi
   echo -e "${ln} ${1}. Finished\t\t\t\n"
