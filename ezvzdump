@@ -34,6 +34,11 @@ function email_file() {
 }
 
 function log {
+  if  [ -n "${2}" ] && isNumber "${2}" && [ "${2}" -ne "0" ]; then
+    e "ERROR: ${1}\t Returned ${2}"
+    e "ERROR: ${1}\t Returned ${2}" >> $LOG_FILE
+    return
+  fi
   e "$1" 
   e "$1" >> $LOG_FILE
 }
@@ -105,7 +110,7 @@ function check_only_instance() {
 }
 
 function remote_execute() {
-	ssh $1 nice -n 19 ionice -c3 $2
+    ssh $1 nice -n 19 ionice -c3 $2
 }
 
 #default config file
@@ -114,7 +119,7 @@ CONFIG_FILE="./ezvzdump.conf"
 #read command line arguments
 while [ $# -gt 0 ]
 do
-	case "$1" in 
+    case "$1" in 
     -c) CONFIG_FILE=$2; shift;;
     -s) BACKUP_SET=$2; shift;;
     -i) INTERACTIVE="true";;
@@ -123,7 +128,7 @@ do
        "usage $0 [-c config_file] [-s backup_set]"
        exit 1;;
      *) break;;
-	esac
+    esac
   shift
 done
 
@@ -176,8 +181,8 @@ if [ -f "$STATE_FILE" ]; then
   ALREADY_DONE=`cat "$STATE_FILE"`
 fi
 if [ -n "$ALREADY_DONE" ]; then
-	log "Found. Backups already completed for VEIDS:"
-	echo "$ALREADY_DONE"
+    log "Found. Backups already completed for VEIDS:"
+    echo "$ALREADY_DONE"
 else
   log "None Found."
 fi
@@ -187,12 +192,13 @@ fi
 for VEID in $VEIDS; do
 
   if [ -n "$ALREADY_DONE" ]; then
-	  if inList "$VEID" "$ALREADY_DONE"; then 
-	    log "backup for $VEID already done in last interrupted backup"
-	    continue
-	  fi
+      if inList "$VEID" "$ALREADY_DONE"; then 
+        log "backup for $VEID already done in last interrupted backup"
+        continue
+      fi
   fi
 
+  #phase 1 backup (rsync files from vz root without suspending the container
   VEHOSTNAME=`vzlist -o hostname $VEID -H`
   echo ""
   e "Beginning backup of VEID: $VEID";
@@ -207,26 +213,71 @@ for VEID in $VEIDS; do
   [ ! -d "${VZ_PRIVATE}${VEID}" ] && die "\$VZ_PRIVATE\$VEID directory doesn't exist. (${VZ_PRIVATE}${VEID})"
   ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
 
+  #phase2, checkpoint the container and sync
+  #suspend
+  #if lvm:
+  #  take snapshot
+  #  mount snapshot
+  #  rsysnc snaphot
+  #else:
+  #  rsync vz directory
+
   # If the VE is running, suspend, re-rsync and then resume it ...
   if [ -n "$(${VZCTL} status ${VEID} | grep running)" ]; then
 
-    e "Suspending VEID: $VEID"
+    e "About to suspend VEID: $VEID"
+    sleep 3
     before="$(date +%s)"
     ${VZCTL} chkpnt $VEID --suspend
+    
+    if [ -n "${LVM}" -a -b "${LVM_DEVICES_PATH}/${LVM_GROUP}/${LVM_VOLUME}" ]; then
+        log "using lvm snapshots"
+        snapshot_device_name="ezvzdump-"`date +%Y%m%d%H%M%s`
+        log "about to create snapshot ${snapshot_device_name}"
+        snap_output=`lvcreate -s -L ${LVM_SNAPSHOT_SIZE} -n ${snapshot_device_name} "${LVM_DEVICES_PATH}/${LVM_GROUP}/${LVM_VOLUME}"`
+        snap_return_status="$?"
+        log "${snap_output}"
+        log "created device ${snapshot_device_name}" ${snap_return_status}
+        ${VZCTL} chkpnt $VEID --resume
+            log "Resumed VEID: $VEID" $?
+        after="$(date +%s)"
+        elapsed_seconds="$(expr $after - $before)"
+        log "Container ${VEID} ($VEHOSTNAME) was down $elapsed_seconds seconds during backup process." 
+        if [ "${snap_return_status}" -ne "0" ]; then
+            log "Failed to create snapshot from ${LVM_DEVICES_PATH}/${LVM_GROUP}/${LVM_VOLUME}" "${snap_output}"
+            log "### Skipping backup for VEID: ${VEID}"
+        else
+            mountpoint=`mktemp -d`
+            log "made temporary mountpoint: ${mountpoint}" $?
+            sleep 3 #XXX properly wait for the lvm device file to be created
+            log "about to mount ${LVM_DEVICES_PATH}/${LVM_GROUP}/${snapshot_device_name} ${mountpoint}"
+            mount ${LVM_DEVICES_PATH}/${LVM_GROUP}/${snapshot_device_name} ${mountpoint}
+            log "mounted ${snapshot_device} on ${mountpoint}" $?
+            VZ_SNAPSHOT_PRIVATE="${mountpoint}${VZ_PRIVATE#${LVM_MOUNTPOINT}}"
+            log "initiating second phase rsync from ${VZ_SNAPSHOT_PRIVATE}${VEID} to ${LOCAL_DIR}"
+            ${RSYNC} ${VZ_SNAPSHOT_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
+            log "rsync finished." $? 
+            umount ${mountpoint}
+            log "umounted ${mountpoint}" $?
+            lvchange -a n ${LVM_GROUP}/${snapshot_device_name}
+            log "disabled lvm snapshot ${snapshot_device_name}" $?
+            lvremove -f ${LVM_GROUP}/${snapshot_device_name}
+            log "removed lvm snapshot ${snapshot_device_name}" $?
+        fi
+    else
+        log "initiating second phase rsync" 
+        ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
+        log "rsync finished." $? 
 
-    e "Commencing second pass rsync ..."
-    ${RSYNC} ${VZ_PRIVATE}${VEID} ${LOCAL_DIR} | count_lines "Files locally transfered"
+        ${VZCTL} chkpnt $VEID --resume
+        log "Resumed VEID: $VEID" $?
+        after="$(date +%s)"
+        elapsed_seconds="$(expr $after - $before)"
 
-    e "Resuming VEID: $VEID"
-    ${VZCTL} chkpnt $VEID --resume
-    after="$(date +%s)"
-    elapsed_seconds="$(expr $after - $before)"
-
-    e "Done."
-    log "Container ${VEID} ($VEHOSTNAME) was down $elapsed_seconds seconds during backup process." 
-
+        log "Container ${VEID} ($VEHOSTNAME) was down $elapsed_seconds seconds during backup process." 
+    fi
   else
-    e "# # # Skipping suspend/re-rsync/resume, as the VEID: ${VEID} is not curently running."
+    log  "### Skipping suspend/re-rsync/resume, as the VEID: ${VEID} is not curently running."
   fi
 
   # Copy VE config files over into the VE storage/cache area
@@ -263,13 +314,13 @@ for VEID in $VEIDS; do
     done
       #make gzipped tar backup
       if [ "${CONCURRENT_JOBS}" = "true" ]; then
-	#run in background, no feedback
+    #run in background, no feedback
         e "making remote gzipped tar in backgound, no feedback"
         remote_execute "${REMOTE_HOST}" "tar czf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
       else
       TOTAL_LINES=`find ${LOCAL_DIR}/${VEID} | wc -l`
-	e "making remote gzipped tar backup"
-	#run in foreground, percent feedback
+    e "making remote gzipped tar backup"
+    #run in foreground, percent feedback
         remote_execute "${REMOTE_HOST}" "tar cvzf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null" | count_lines "files archived" "${TOTAL_LINES}"
       fi
   fi
