@@ -259,8 +259,6 @@ for VEID in $VEIDS; do
             log "rsync finished." $? 
             umount ${mountpoint}
             log "umounted ${mountpoint}" $?
-            lvchange -a n ${LVM_GROUP}/${snapshot_device_name}
-            log "disabled lvm snapshot ${snapshot_device_name}" $?
             lvremove -f ${LVM_GROUP}/${snapshot_device_name}
             log "removed lvm snapshot ${snapshot_device_name}" $?
         fi
