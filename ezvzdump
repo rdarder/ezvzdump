@@ -110,7 +110,7 @@ function check_only_instance() {
 }
 
 function remote_execute() {
-    ssh $1 nice -n 19 ionice -c3 $2
+    ssh $1 ${REMOTE_NICE:-} ${REMOTE_IONICE:-} $2
 }
 
 #default config file
@@ -299,13 +299,13 @@ for VEID in $VEIDS; do
 
   # Run the remote rsync
   if [ -n "${REMOTE_HOST}" ] && [ -n "${REMOTE_DIR}" ]; then
-    e "Commencing remote ${RSYNC} ${LOCAL_DIR}${VEID} ${REMOTE_HOST}:${REMOTE_DIR}${VEID}"
-    ${RSYNC} ${LOCAL_DIR}${VEID}/ ${REMOTE_HOST}:${REMOTE_DIR}${VEID}/ | count_lines "Files transfered" 
+    e "Commencing remote ${RSYNC} ${LOCAL_DIR}${VEID} ${REMOTE_USER:+$REMOTE_USER@}${REMOTE_HOST}:${REMOTE_DIR}${VEID}"
+    ${RSYNC} ${LOCAL_DIR}${VEID}/ ${REMOTE_USER:+$REMOTE_USER@}${REMOTE_HOST}:${REMOTE_DIR}${VEID}/ | count_lines "Files transfered"
 
     #rotate previous remote backups
     e "rotating up to $ROTATION backups"
     for ROT in `seq $((ROTATION-1)) -1 0`; do
-      remote_execute "${REMOTE_HOST}" "[ -f ${REMOTE_DIR}${VEID}.${BACKUP_SET}${ROT}.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.${ROT}.tar.gz ${REMOTE_DIR}${VEID}.${BACKUP_SET}.$((ROT+1)).tar.gz" 
+      remote_execute "${REMOTE_USER:+$REMOTE_USER@}${REMOTE_HOST}" "[ -f ${REMOTE_DIR}${VEID}.${BACKUP_SET}${ROT}.tar.gz ] && mv -f ${REMOTE_DIR}${VEID}.${ROT}.tar.gz ${REMOTE_DIR}${VEID}.${BACKUP_SET}.$((ROT+1)).tar.gz"
       if [ "$?" -eq 0 ]; then
         e "rotated backup ${ROT}"
       else
@@ -316,12 +316,12 @@ for VEID in $VEIDS; do
       if [ "${CONCURRENT_JOBS}" = "true" ]; then
     #run in background, no feedback
         e "making remote gzipped tar in backgound, no feedback"
-        remote_execute "${REMOTE_HOST}" "tar czf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
+        remote_execute "${REMOTE_USER:+$REMOTE_USER@}${REMOTE_HOST}" "tar czf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null " &
       else
       TOTAL_LINES=`find ${LOCAL_DIR}/${VEID} | wc -l`
     e "making remote gzipped tar backup"
     #run in foreground, percent feedback
-        remote_execute "${REMOTE_HOST}" "tar cvzf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null" | count_lines "files archived" "${TOTAL_LINES}"
+        remote_execute "${REMOTE_USER:+$REMOTE_USER@}${REMOTE_HOST}" "tar cvzf ${REMOTE_DIR}${VEID}.${BACKUP_SET}.0.tar.gz --numeric-owner -C ${REMOTE_DIR}${VEID} ./ 2>/dev/null" | count_lines "files archived" "${TOTAL_LINES}"
       fi
   fi
 
